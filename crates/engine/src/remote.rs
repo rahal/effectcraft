@@ -416,6 +416,21 @@ impl FrameServer {
         }
     }
 
+    /// [`FrameServer::handle`], then the passes of a frame with deferred readbacks: awaits the
+    /// accelerator ([`Accelerator::settle`]) and [`FrameServer::resume`]s until the frame is
+    /// done. For transports that own the server across the await (the player's frame workers).
+    pub async fn handle_async(&mut self, msg: FrameMsg) -> Vec<(FrameReply, Option<Vec<u8>>)> {
+        let mut replies = self.handle(msg);
+        while self.waiting() {
+            let Some(a) = self.accel.clone() else { break };
+            if let Some(f) = a.settle() {
+                f.await;
+            }
+            replies = self.resume();
+        }
+        replies
+    }
+
     /// Run the next pass of the frame in progress; its reply once it is done.
     pub fn resume(&mut self) -> Vec<(FrameReply, Option<Vec<u8>>)> {
         let Some(mut pr) = self.pending.take() else { return vec![] };
@@ -722,6 +737,33 @@ mod tests {
         fn miss_gate(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
             Some(self.gate.clone())
         }
+        fn settle(&self) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>> {
+            Deferred::settle(self);
+            Some(Box::pin(async {}))
+        }
+    }
+
+    /// `handle_async` drives the passes itself: the frame matches the CPU's, in more than one pass.
+    #[test]
+    fn handle_async_awaits_the_passes() {
+        let mut s = Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        let comp = s.active_comp_id().unwrap();
+        s.execute("layer.newSolid", json!({"color": "#3388ff", "name": "Blue", "width": 200, "height": 120})).unwrap();
+        s.execute("effect.apply", json!({"effect": "ec.blur.gaussian"})).unwrap();
+        let opts = RenderOpts { scale: 0.25, backend: Backend::Gpu, ..Default::default() };
+        let t = Tick::from_seconds_f64(1.0);
+        let mut w = server(&s);
+        w.set_accel(Some(Arc::new(Deferred::default())));
+        let mut m = Mirror::default();
+        let run = |w: &mut FrameServer, msg: FrameMsg| effectcraft_render::passes::block_on(w.handle_async(round(&msg)));
+        assert!(run(&mut w, m.sync(s.revision, &s.project).unwrap()).is_empty());
+        let out =
+            run(&mut w, FrameMsg::Render { id: 1, revision: s.revision, comp, time: t, opts: Box::new(opts), disk: None, layers: false, prefetch: vec![] });
+        let (FrameReply::Frame { id: 1, passes, gpu: true, .. }, Some(px)) = &out[0] else { panic!("{:?}", out.first().map(|o| &o.0)) };
+        assert!((2..MAX_PASSES).contains(passes), "{passes}");
+        assert!(!w.waiting());
+        assert_eq!(*px, local(&s, comp, t, RenderOpts { backend: Backend::Cpu, ..opts }));
     }
 
     #[test]
