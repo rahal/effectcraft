@@ -7,6 +7,9 @@ few small scripts (worker, audio worklet, service worker), a web manifest and ic
 uploaded anywhere: projects, media, settings and renders stay in the browser (its private storage)
 and on the user's machine.
 
+To play a project inside another web page without the editor (a canvas, Web Audio and a small
+JavaScript API), see the embeddable player, [player.md](player.md).
+
 ## Build and run
 
 | Tool | Version | Install |

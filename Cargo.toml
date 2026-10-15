@@ -211,3 +211,9 @@ codegen-units = 1
 
 [patch.crates-io]
 hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d", version = "=0.7.2" }
+
+# `cargo xtask player`: the embeddable player (`--opt` overrides the level, `z` for size).
+[profile.wasm-player]
+inherits = "release"
+opt-level = 3
+lto = "fat"

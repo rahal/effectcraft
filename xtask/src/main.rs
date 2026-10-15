@@ -6,6 +6,11 @@
 //!   and the web app.
 //! - `web [--dev] [--serve PORT]`: build the web app (`apps/effectcraft-web`) into
 //!   `<target>/web/dist` with `wasm-bindgen` (docs/web.md); `--serve` serves it on localhost.
+//! - `player [--dev] [--opt 0|1|2|3|s|z] [--split MIB] [--serve PORT]`: the same for the
+//!   embeddable player (`apps/effectcraft-player`, docs/player.md) into `<target>/player/dist`,
+//!   profile `wasm-player`: `--opt` level for rustc and wasm-opt (default `z`, smallest), the
+//!   module in parts of at most `MIB` MiB (0 = one file; default 20 when over 25 MiB) for hosts
+//!   that limit file sizes.
 //! - `assets`: every asset file (image, icon, font, LUT, audio, video…) has a complete
 //!   `<file>.attribution` sidecar and an entry in `ATTRIBUTION.md` (AGENTS.md §1).
 //! - `ico <out.ico> <in.png>…`: pack PNGs into a Windows `.ico` (used by `packaging/icons.sh`).
@@ -61,6 +66,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("effectcraft", 6),
     ("cli", 6),
     ("web", 6),
+    ("player", 6),
 ];
 
 /// Allowed same-layer edges (from, to).
@@ -230,7 +236,7 @@ fn run(cmd: &mut Command) -> Result<(), String> {
 }
 
 /// Crates above L4 that must also build for the web.
-const WEB_CRATES: &[&str] = &["effectcraft-ui-egui", "effectcraft-web"];
+const WEB_CRATES: &[&str] = &["effectcraft-ui-egui", "effectcraft-web", "effectcraft-player"];
 
 fn wasm() -> Result<(), String> {
     let md = metadata()?;
@@ -258,49 +264,146 @@ fn target_dir() -> std::path::PathBuf {
     std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("target"))
 }
 
-/// Build the web app into `<target>/web/dist` (see docs/web.md).
-fn web(args: &[String]) -> Result<(), String> {
-    let dev = args.iter().any(|a| a == "--dev");
-    let serve = args.iter().position(|a| a == "--serve").map(|i| args.get(i + 1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(8765));
-    let profile = if dev { "dev" } else { "release" };
+/// Build crate `krate` for wasm32 with cargo `profile` (its opt-level overridden by `level`),
+/// run `wasm-bindgen` (and `wasm-opt` with `opt` when found, except for `dev`) into
+/// `<target>/<out>/dist` and copy `apps/<krate>/web` next to it. Returns (dist, the `.wasm`).
+fn bindgen(krate: &str, out: &str, profile: &str, level: Option<&str>, opt: &[&str]) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let dev = profile == "dev";
     let mut build = Command::new(env!("CARGO"));
-    build.args(["build", "--target", "wasm32-unknown-unknown", "-p", "effectcraft-web", "--profile", profile]);
+    build.args(["build", "--target", "wasm32-unknown-unknown", "-p", krate, "--profile", profile]);
+    if let Some(l) = level {
+        build.env(format!("CARGO_PROFILE_{}_OPT_LEVEL", profile.to_uppercase().replace('-', "_")), l);
+    }
     run(&mut build)?;
-    let out = Command::new("wasm-bindgen")
+    let version = Command::new("wasm-bindgen")
         .arg("--version")
         .output()
         .map_err(|_| format!("wasm-bindgen CLI not found: cargo install wasm-bindgen-cli --version {WASM_BINDGEN} --locked"))?;
-    let v = String::from_utf8_lossy(&out.stdout);
+    let v = String::from_utf8_lossy(&version.stdout);
     if !v.contains(WASM_BINDGEN) {
         return Err(format!(
             "wasm-bindgen CLI is {} but the crate is {WASM_BINDGEN}: cargo install wasm-bindgen-cli --version {WASM_BINDGEN} --locked",
             v.trim()
         ));
     }
-    let dir = if dev { "debug" } else { "release" };
-    let wasm = target_dir().join("wasm32-unknown-unknown").join(dir).join("effectcraft_web.wasm");
-    let dist = target_dir().join("web").join("dist");
+    let dir = if dev { "debug" } else { profile };
+    let stem = krate.replace('-', "_");
+    let wasm = target_dir().join("wasm32-unknown-unknown").join(dir).join(format!("{stem}.wasm"));
+    let dist = target_dir().join(out).join("dist");
     let _ = std::fs::remove_dir_all(&dist);
     std::fs::create_dir_all(&dist).map_err(|e| e.to_string())?;
     run(Command::new("wasm-bindgen").args(["--target", "web", "--no-typescript", "--out-dir"]).arg(&dist).arg(&wasm))?;
-    let bg = dist.join("effectcraft_web_bg.wasm");
+    let bg = dist.join(format!("{stem}_bg.wasm"));
     if !dev && Command::new("wasm-opt").arg("--version").output().is_ok() {
         // optional: smaller and faster (binaryen); skipped when not installed
-        let opt = dist.join("effectcraft_web_opt.wasm");
+        // The features are the module's own (`--all-features` lets wasm-opt emit encodings
+        // browsers reject, such as compact imports).
+        let out = dist.join(format!("{stem}_opt.wasm"));
         run(Command::new("wasm-opt")
-            .args(["-O2", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-sign-ext", "--enable-mutable-globals"])
+            .args(opt)
+            .args(["--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-sign-ext", "--enable-mutable-globals"])
             .arg(&bg)
             .arg("-o")
-            .arg(&opt))?;
-        std::fs::rename(&opt, &bg).map_err(|e| e.to_string())?;
+            .arg(&out))?;
+        std::fs::rename(&out, &bg).map_err(|e| e.to_string())?;
     }
-    let web = std::path::Path::new("apps/effectcraft-web/web");
-    for e in std::fs::read_dir(web).map_err(|e| e.to_string())?.flatten() {
+    let web = std::path::Path::new("apps").join(krate).join("web");
+    for e in std::fs::read_dir(&web).map_err(|e| e.to_string())?.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         if !name.ends_with(".attribution") {
             std::fs::copy(e.path(), dist.join(&name)).map_err(|e| format!("{name}: {e}"))?;
         }
     }
+    Ok((dist, bg))
+}
+
+fn serve_arg(args: &[String]) -> Option<u16> {
+    args.iter().position(|a| a == "--serve").map(|i| args.get(i + 1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(8765))
+}
+
+/// Build the embeddable player (`apps/effectcraft-player`) into `<target>/player/dist` (see
+/// docs/player.md).
+fn player(args: &[String]) -> Result<(), String> {
+    let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
+    // Optimised for speed by default (frames render on the viewer's CPU); `--opt z` trades speed
+    // for size (the same level for rustc and wasm-opt).
+    let level = arg("--opt").map_or("3", String::as_str);
+    if !["0", "1", "2", "3", "s", "z"].contains(&level) {
+        return Err(format!("--opt {level}: expected 0, 1, 2, 3, s or z"));
+    }
+    let profile = if args.iter().any(|a| a == "--dev") { "dev" } else { "wasm-player" };
+    let (dist, bg) = bindgen("effectcraft-player", "player", profile, Some(level), &[&format!("-O{level}"), "--strip-debug", "--strip-producers"])?;
+    // The demo page's samples (`?example=news-short&lang=ar`).
+    fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+        std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
+        for e in std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))?.flatten() {
+            let name = e.file_name();
+            if e.path().is_dir() {
+                copy_dir(&e.path(), &to.join(&name))?;
+            } else if !name.to_string_lossy().ends_with(".attribution") {
+                std::fs::copy(e.path(), to.join(&name)).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    }
+    copy_dir(std::path::Path::new("examples/player"), &dist.join("examples/player"))?;
+    let size = std::fs::metadata(&bg).map(|m| m.len()).unwrap_or(0);
+    println!("player: {} ({:.1} MB wasm)", dist.display(), size as f64 / 1e6);
+    // The manifest player.js reads: compressed copies it prefers, the parts, else the one file.
+    let mut manifest = serde_json::json!({"size": size});
+    // Compressed copies that player.js decompresses itself (static hosts don't serve
+    // pre-compressed files as such); a copy is skipped when its tool isn't installed.
+    if profile != "dev" {
+        for (key, tool, flags, ext) in [("br", "brotli", &["-c", "-q", "11"][..], "br"), ("gzip", "gzip", &["-c", "-9"][..], "gz")] {
+            if Command::new(tool).arg("--version").output().is_err() {
+                println!("  {tool} not found: no .{ext} copy");
+                continue;
+            }
+            let name = format!("effectcraft_player_bg.wasm.{ext}");
+            let out = std::fs::File::create(dist.join(&name)).map_err(|e| e.to_string())?;
+            run(Command::new(tool).args(flags).arg(&bg).stdout(out))?;
+            let len = std::fs::metadata(dist.join(&name)).map(|m| m.len()).unwrap_or(0);
+            println!("  {name}: {:.1} MB", len as f64 / 1e6);
+            manifest[key] = serde_json::json!(name);
+        }
+    }
+    // Static hosts limit file sizes (Cloudflare Pages: 25 MiB): the module ships in parts of at
+    // most `--split` MiB (0 = one file; default: 20 when over 25 MiB) that player.js streams
+    // back together.
+    let auto = if size > 25 * 1024 * 1024 { 20 } else { 0 };
+    let mib = arg("--split").map_or(Ok(auto), |v| v.parse::<u64>().map_err(|e| format!("--split {v}: {e}")))?;
+    if mib > 0 {
+        let bytes = std::fs::read(&bg).map_err(|e| e.to_string())?;
+        let parts = split_parts(bytes.len(), (mib * 1024 * 1024) as usize);
+        let mut names = vec![];
+        for (k, r) in parts.iter().enumerate() {
+            let name = format!("effectcraft_player_bg.{k}.wasm");
+            std::fs::write(dist.join(&name), bytes.get(r.clone()).unwrap_or_default()).map_err(|e| e.to_string())?;
+            println!("  {name}: {:.1} MB", r.len() as f64 / 1e6);
+            names.push(name);
+        }
+        manifest["parts"] = serde_json::json!(names);
+        std::fs::remove_file(&bg).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(dist.join("effectcraft_player_bg.json"), manifest.to_string()).map_err(|e| e.to_string())?;
+    if let Some(port) = serve_arg(args) {
+        serve_dir(&dist, port)?;
+    }
+    Ok(())
+}
+
+/// Byte ranges of `len` bytes cut into parts of at most `max` (at least one part).
+fn split_parts(len: usize, max: usize) -> Vec<std::ops::Range<usize>> {
+    let max = max.max(1);
+    let n = len.div_ceil(max).max(1);
+    (0..n).map(|k| k * max..((k + 1) * max).min(len)).collect()
+}
+
+/// Build the web app into `<target>/web/dist` (see docs/web.md).
+fn web(args: &[String]) -> Result<(), String> {
+    let dev = args.iter().any(|a| a == "--dev");
+    let serve = serve_arg(args);
+    let (dist, bg) = bindgen("effectcraft-web", "web", if dev { "dev" } else { "release" }, None, &["-O2"])?;
     // PWA icons: the app icon (assets/app-icon, attributed there).
     for n in [256, 512] {
         let src = format!("assets/app-icon/hicolor/{n}x{n}/apps/ai.storyteller.effectcraft.png");
@@ -426,6 +529,7 @@ fn main() -> ExitCode {
         "pdf-deps" => pdf_deps::run(&root()),
         "ci" => ci(),
         "web" => web(&std::env::args().skip(2).collect::<Vec<_>>()),
+        "player" => player(&std::env::args().skip(2).collect::<Vec<_>>()),
         "bench" => bench::run(&root(), &std::env::args().skip(2).collect::<Vec<_>>()),
         "ico" => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
@@ -435,7 +539,7 @@ fn main() -> ExitCode {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             version::run(&root(), &rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
-        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
+        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|wasm|web [--dev] [--serve PORT]|player [--dev] [--opt 0|1|2|3|s|z] [--split MIB] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
@@ -449,4 +553,14 @@ fn main() -> ExitCode {
 /// The workspace root (the parent of `xtask/`).
 pub fn root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask has a parent dir").to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn split_parts_cover_the_file_in_order() {
+        assert_eq!(super::split_parts(10, 4), vec![0..4, 4..8, 8..10]);
+        assert_eq!(super::split_parts(8, 4), vec![0..4, 4..8]);
+        assert_eq!(super::split_parts(0, 4), vec![0..0]);
+    }
 }

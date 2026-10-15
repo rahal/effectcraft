@@ -1507,6 +1507,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "effectcraft-player"
+version = "0.10.0"
+dependencies = [
+ "effectcraft-engine",
+ "effectcraft-expr",
+ "effectcraft-gpu",
+ "effectcraft-media",
+ "effectcraft-script",
+ "js-sys",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "effectcraft-plugin"
 version = "0.10.0"
 dependencies = [

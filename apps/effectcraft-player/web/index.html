@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EffectCraft Player</title>
+<style>
+  :root { color-scheme: dark; font: 14px system-ui, sans-serif; }
+  body { margin: 0; display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; padding: 16px; background: #111; color: #ddd; }
+  #stage { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+  canvas { max-width: 100%; max-height: 80vh; background: #000; }
+  .bar { display: flex; gap: 8px; align-items: center; width: 100%; }
+  #scrub { flex: 1; }
+  aside { display: flex; flex-direction: column; gap: 10px; }
+  label { display: flex; flex-direction: column; gap: 4px; }
+  input[type=text], textarea { background: #222; color: #eee; border: 1px solid #444; padding: 4px; }
+  pre { white-space: pre-wrap; font-size: 12px; color: #9a9; }
+  @media (max-width: 760px) { body { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="view" width="540" height="960"></canvas>
+  <div class="bar">
+    <button id="play">Play</button>
+    <input id="scrub" type="range" min="0" max="1" step="0.001" value="0">
+    <span id="time">0.00</span>
+  </div>
+</div>
+<aside>
+  <label>Project (.ecproj) or template script (.jsx), with its footage, fonts and props.json
+    <input id="files" type="file" multiple>
+  </label>
+  <div id="controls"></div>
+  <pre id="log"></pre>
+</aside>
+<script type="module">
+import { EffectcraftPlayer } from "./player.js";
+
+const $ = (id) => document.getElementById(id);
+const log = (s) => ($("log").textContent = s + "\n" + $("log").textContent);
+const q = new URLSearchParams(location.search);
+const player = await EffectcraftPlayer.create({ canvas: $("view"), workers: Number(q.get("workers") ?? 2), gpu: !q.has("nogpu") });
+window.player = player;
+window.EffectcraftPlayer = EffectcraftPlayer;
+log(`ready in ${player.stats.loadMs.toFixed(0)} ms; workers: ${JSON.stringify(player.stats.workers)}`);
+
+player.addEventListener("timeupdate", (e) => {
+  $("time").textContent = e.detail.time.toFixed(2);
+  if (!$("scrub").matches(":active")) $("scrub").value = e.detail.time / (player.duration || 1);
+});
+player.addEventListener("play", () => ($("play").textContent = "Pause"));
+player.addEventListener("pause", () => ($("play").textContent = "Play"));
+player.addEventListener("error", (e) => log("error: " + e.detail.error));
+$("play").onclick = () => (player.paused ? player.play() : player.pause());
+$("scrub").oninput = (e) => player.seek(e.target.value * player.duration);
+
+function controls(info) {
+  const box = $("controls");
+  box.textContent = "";
+  const flat = (cs) => cs.flatMap((c) => (c.kind === "group" ? flat(c.children) : [c]));
+  for (const c of flat(info.controls ?? [])) {
+    const l = document.createElement("label");
+    l.textContent = c.name;
+    const i = document.createElement("input");
+    if (c.kind === "media") { i.type = "file"; i.onchange = () => i.files[0] && player.set(c.name, i.files[0]); }
+    else if (typeof c.value === "boolean") { i.type = "checkbox"; i.checked = c.value; i.onchange = () => player.set(c.name, i.checked); }
+    else if (typeof c.value === "number") { i.type = "number"; i.step = "any"; i.value = c.value; i.oninput = () => player.set(c.name, Number(i.value)); }
+    else if (typeof c.value === "string") { i.type = "text"; i.value = c.value; i.oninput = () => player.set(c.name, i.value); }
+    else continue;
+    l.append(i);
+    box.append(l);
+  }
+}
+
+// Pick a .ecproj (or a .jsx + props.json) with the files it reads: local files, as blob: URLs.
+$("files").onchange = async (e) => {
+  const picked = [...e.target.files];
+  const files = Object.fromEntries(picked.map((f) => [f.name, URL.createObjectURL(f)]));
+  const proj = picked.find((f) => f.name.endsWith(".ecproj"));
+  const jsx = picked.find((f) => /\.jsx?$/.test(f.name));
+  const props = picked.find((f) => f.name === "props.json") ?? picked.find((f) => /^props.*\.json$/.test(f.name));
+  try {
+    const info = jsx ? await player.load({ script: files[jsx.name], props: props && (await props.text()), files })
+                     : await player.load({ project: files[proj.name], files });
+    log(`${info.name}: ${info.width}x${info.height} @ ${info.fps}, ${info.duration.toFixed(2)} s, ${info.controls.length} controls`);
+    $("scrub").value = 0;
+    controls(info);
+  } catch (err) {
+    log("load failed: " + err);
+  }
+};
+
+// The samples in examples/player (copied next to the page by `cargo xtask player`), their
+// files handed over as blob: URLs like files picked on the page: `?example=news-short&lang=ar`.
+// The fonts come from examples/player/prepare.sh (run it before `cargo xtask player`).
+const EXAMPLES = { "news-short": ["media.jpg"] };
+const FONTS = ["Cairo-Bold.ttf", "Cairo-SemiBold.ttf", "Cairo-Black.ttf"];
+window.exampleArgs = async (name, lang = "fr") => {
+  const dir = `examples/player/${name}/`;
+  const blob = async (p) => URL.createObjectURL(await (await fetch(dir + p)).blob());
+  const files = {};
+  for (const f of EXAMPLES[name]) files[f] = await blob(f);
+  for (const f of FONTS) files[f] = await blob("../assets/" + f);
+  return { script: await blob(`${name}.jsx`), props: await (await fetch(`${dir}props-${lang}.json`)).json(), files };
+};
+window.loadExample = async (name, lang = "fr") => {
+  window.lastLoad = await window.exampleArgs(name, lang);
+  const t0 = performance.now();
+  const info = await player.load(window.lastLoad);
+  log(`${name} (${lang}): built in ${(performance.now() - t0).toFixed(0)} ms`);
+  controls(info);
+  return info;
+};
+
+// Without files: a small generated project, so the page shows something.
+if (q.has("example")) {
+  await window.loadExample(q.get("example"), q.get("lang") ?? "fr");
+} else if (!q.has("blank")) {
+  const demo = `var c = app.project.items.addComp("demo", 1080, 1920, 1, 4, 30);
+var bg = c.layers.addSolid([0.1, 0.12, 0.2], "bg", 1080, 1920, 1);
+var t = c.layers.addText("EffectCraft"); t.name = "title";
+var d = t.property("Source Text").value; d.fontSize = 140; d.fillColor = [1, 1, 1]; t.property("Source Text").setValue(d);
+t.property("Transform").property("Position").setValueAtTime(0, [140, 900]);
+t.property("Transform").property("Position").setValueAtTime(4, [140, 1100]);
+t.property("Transform").property("Anchor Point").setValue([0, 0]);
+t.property("Transform").property("Opacity").setValueAtTime(0, 0);
+t.property("Transform").property("Opacity").setValueAtTime(1, 100);
+t.property("Source Text").addToMotionGraphicsTemplateAs(c, "title");`;
+  const info = await player.load({ script: demo });
+  controls(info);
+}
+window.demoReady = true;
+</script>
+</body>
+</html>

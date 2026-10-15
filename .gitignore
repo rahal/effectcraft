@@ -4,4 +4,7 @@ target/
 /dist
 /log
 .DS_Store
+# Made by examples/player/prepare.sh
+/examples/player/assets/
+/examples/player/*/*.ecproj
 .claude/worktrees/

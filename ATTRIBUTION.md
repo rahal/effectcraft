@@ -43,6 +43,7 @@ iconography, images or other Adobe assets; open licences only; every asset attri
 | `crates/model/tests/fixtures/quad.glb` | EffectCraft contributors | Original work: binary glTF test fixture (the same quad with its texture in the BIN chunk) | MIT OR Apache-2.0 |
 | `crates/model/tests/fixtures/cube.obj` | EffectCraft contributors | Original work: Wavefront OBJ test fixture (unit cube, two materials) | MIT OR Apache-2.0 |
 | `crates/model/tests/fixtures/cube.mtl` | EffectCraft contributors | Original work: MTL test fixture (materials of cube.obj) | MIT OR Apache-2.0 |
+| `examples/player/news-short/media.jpg` | EffectCraft contributors | Original work: generated gradient placeholder for the player samples | MIT OR Apache-2.0 |
 
 ## Screenshots
 

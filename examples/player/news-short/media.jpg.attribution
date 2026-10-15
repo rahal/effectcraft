@@ -1,0 +1,7 @@
+asset:        media.jpg
+title:        Gradient placeholder (player sample background)
+author:       EffectCraft contributors
+source:       Original work: a generated colour gradient
+license:      MIT OR Apache-2.0
+added:        2026-10-15 by Claude (agent)
+notes:        Stands in for a news photo in the news-short player sample (docs/player.md).

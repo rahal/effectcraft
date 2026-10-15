@@ -1,0 +1,29 @@
+[package]
+name = "effectcraft-player"
+description = "Embeddable EffectCraft player for the browser (wasm32, no editor UI): load a project, set its Essential Graphics controls or run a template script, draw frames rendered in Web Workers into a canvas, play with Web Audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The portable core (`base.rs`: session, file table, worker sync, audio mix) builds and is
+# unit-tested natively; the wasm-bindgen glue is wasm32-only. Build: `cargo xtask player`.
+[dependencies]
+effectcraft-engine = { workspace = true }
+effectcraft-media = { workspace = true }
+effectcraft-expr = { workspace = true }
+effectcraft-script = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+effectcraft-gpu = { workspace = true }
+# The wasm-bindgen CLI used by `cargo xtask player` must be exactly this version.
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
