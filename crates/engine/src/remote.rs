@@ -205,19 +205,34 @@ pub enum FrameReply {
     Resync { error: String },
 }
 
-/// The page's record of a worker's replica.
+/// The page's record of a worker's replica and of the files it was sent (path → version).
 #[derive(Default)]
 pub struct Mirror {
     sent: Option<(u64, Value)>,
+    files: std::collections::HashMap<String, u64>,
 }
 
 impl Mirror {
+    /// Of `paths`, those the worker lacks at their current `version` (`None`: not available,
+    /// skipped); marks them sent. A replaced file has a new version and goes again.
+    pub fn files(&mut self, paths: impl IntoIterator<Item = String>, version: impl Fn(&str) -> Option<u64>) -> Vec<String> {
+        let mut send = vec![];
+        for p in paths {
+            let Some(v) = version(&p) else { continue };
+            if self.files.get(&p) != Some(&v) {
+                self.files.insert(p.clone(), v);
+                send.push(p);
+            }
+        }
+        send
+    }
+
     /// The revision the worker holds.
     pub fn revision(&self) -> Option<u64> {
         self.sent.as_ref().map(|s| s.0)
     }
 
-    /// Forget the replica (the next sync sends the whole project).
+    /// Forget the replica (the next sync sends the whole project; files it holds stay).
     pub fn reset(&mut self) {
         self.sent = None;
     }

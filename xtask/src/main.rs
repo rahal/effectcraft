@@ -8,7 +8,7 @@
 //!   `<target>/web/dist` with `wasm-bindgen` (docs/web.md); `--serve` serves it on localhost.
 //! - `player [--dev] [--opt 0|1|2|3|s|z] [--split MIB] [--serve PORT]`: the same for the
 //!   embeddable player (`apps/effectcraft-player`, docs/player.md) into `<target>/player/dist`,
-//!   profile `wasm-player`: `--opt` level for rustc and wasm-opt (default `z`, smallest), the
+//!   profile `wasm-player`: `--opt` level for rustc and wasm-opt (default 3; `z` is smallest), the
 //!   module in parts of at most `MIB` MiB (0 = one file; default 20 when over 25 MiB) for hosts
 //!   that limit file sizes.
 //! - `assets`: every asset file (image, icon, font, LUT, audio, video…) has a complete
@@ -327,12 +327,13 @@ fn player(args: &[String]) -> Result<(), String> {
     let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
     // Optimised for speed by default (frames render on the viewer's CPU); `--opt z` trades speed
     // for size (the same level for rustc and wasm-opt).
-    let level = arg("--opt").map_or("3", String::as_str);
-    if !["0", "1", "2", "3", "s", "z"].contains(&level) {
-        return Err(format!("--opt {level}: expected 0, 1, 2, 3, s or z"));
+    let level = arg("--opt").map(String::as_str);
+    if let Some(l) = level.filter(|l| !["0", "1", "2", "3", "s", "z"].contains(l)) {
+        return Err(format!("--opt {l}: expected 0, 1, 2, 3, s or z"));
     }
     let profile = if args.iter().any(|a| a == "--dev") { "dev" } else { "wasm-player" };
-    let (dist, bg) = bindgen("effectcraft-player", "player", profile, Some(level), &[&format!("-O{level}"), "--strip-debug", "--strip-producers"])?;
+    // Without `--opt`, the profile's own level (`wasm-player`: 3; `dev`: unoptimised).
+    let (dist, bg) = bindgen("effectcraft-player", "player", profile, level, &[&format!("-O{}", level.unwrap_or("3")), "--strip-debug", "--strip-producers"])?;
     // The demo page's samples (`?example=news-short&lang=ar`).
     fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
         std::fs::create_dir_all(to).map_err(|e| e.to_string())?;

@@ -114,18 +114,12 @@ pub fn ingest(files: &Files, pool: &MediaPool, path: &str, data: Arc<[u8]>) {
     }
 }
 
-/// One frame worker as the page sees it: its replica and the files it holds (path → version).
-#[derive(Default)]
-struct Worker {
-    mirror: Mirror,
-    files: HashMap<String, u64>,
-}
-
 pub struct Core {
     pub session: Session,
     pub files: Arc<Files>,
     pub pool: Arc<MediaPool>,
-    workers: HashMap<u32, Worker>,
+    /// Each frame worker's replica and files.
+    workers: HashMap<u32, Mirror>,
 }
 
 impl Default for Core {
@@ -162,7 +156,7 @@ impl Core {
     fn reset(&mut self) {
         self.session = Core::session(&self.files, &self.pool);
         for w in self.workers.values_mut() {
-            w.mirror.reset();
+            w.reset();
         }
     }
 
@@ -269,15 +263,9 @@ impl Core {
     /// it is up to date). Marks them sent.
     pub fn sync(&mut self, w: u32) -> (Vec<String>, Option<String>) {
         let wk = self.workers.entry(w).or_default();
-        let mut send = vec![];
-        for p in footage_files(&self.session.project).into_iter().chain(self.files.fonts()) {
-            let Some((_, v)) = self.files.get(&p) else { continue };
-            if wk.files.get(&p) != Some(&v) {
-                wk.files.insert(p.clone(), v);
-                send.push(p);
-            }
-        }
-        let msg = wk.mirror.sync(self.session.revision, &self.session.project).map(|m| serde_json::to_string(&m).unwrap_or_default());
+        let files = &self.files;
+        let send = wk.files(footage_files(&self.session.project).into_iter().chain(files.fonts()), |p| files.get(p).map(|f| f.1));
+        let msg = wk.sync(self.session.revision, &self.session.project).map(|m| serde_json::to_string(&m).unwrap_or_default());
         (send, msg)
     }
 

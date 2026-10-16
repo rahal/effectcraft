@@ -19,7 +19,6 @@
 //! frame times. Without WebGPU, frames render on the worker's CPU.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use effectcraft_engine::offload::footage_files;
@@ -44,9 +43,8 @@ extern "C" {
 /// One frame worker as the page sees it.
 struct Fw {
     index: u32,
+    /// Its replica and the footage files it was sent.
     mirror: Mirror,
-    /// The footage files it was sent, with their versions (a replaced file goes again).
-    files: HashMap<String, u64>,
     busy: Option<(u64, RemoteDone)>,
     alive: bool,
     /// Its GPU adapter (after it reported), or why it has none.
@@ -77,8 +75,6 @@ thread_local! {
     static HANDLER: RefCell<Option<OnMessage>> = const { RefCell::new(None) };
     /// The worker's frame server (worker side).
     static SERVER: RefCell<Option<FrameServer>> = const { RefCell::new(None) };
-    /// The worker's GPU device (worker side).
-    static GPU: RefCell<Option<Gpu>> = const { RefCell::new(None) };
 }
 
 fn obj(pairs: &[(&str, JsValue)]) -> JsValue {
@@ -100,7 +96,7 @@ impl WebFrames {
             let mut s = s.borrow_mut();
             for _ in 0..n {
                 let index = frame_worker_start(&crate::page_url(""), on.as_ref().unchecked_ref(), gpu);
-                s.workers.push(Fw { index, mirror: Mirror::default(), files: HashMap::new(), busy: None, alive: true, gpu: None });
+                s.workers.push(Fw { index, mirror: Mirror::default(), busy: None, alive: true, gpu: None });
             }
         });
         HANDLER.with(|h| *h.borrow_mut() = Some(on));
@@ -116,14 +112,10 @@ impl WebFrames {
             let Some(k) = s.workers.iter().position(|w| w.alive && w.busy.is_none()) else { return Err((done, "no idle frame worker".to_string())) };
             // Footage the worker hasn't got yet.
             let w = &mut s.workers[k];
-            for p in footage_files(&job.project) {
-                let Some((d, version)) = crate::files::get_versioned(&p) else { continue };
-                if w.files.get(&p) == Some(&version) {
-                    continue;
-                }
+            for p in w.mirror.files(footage_files(&job.project), |p| crate::files::get_versioned(p).map(|f| f.1)) {
+                let Some(d) = crate::files::get(&p) else { continue };
                 let bytes = js_sys::Uint8Array::from(&d[..]);
                 frame_worker_post(w.index, &obj(&[("type", "file".into()), ("path", p.as_str().into()), ("bytes", bytes.into())]), &js_sys::Array::new());
-                w.files.insert(p, version);
             }
             let sync = w.mirror.sync(job.revision, &job.project);
             let index = w.index;
@@ -433,8 +425,7 @@ pub async fn worker_frame_init(gpu: bool) {
         match Gpu::request_deferred().await {
             Ok(g) => {
                 let name = effectcraft_engine::render::Accelerator::name(&g);
-                server.set_accel(Some(Arc::new(g.clone())));
-                GPU.with(|c| *c.borrow_mut() = Some(g));
+                server.set_accel(Some(Arc::new(g)));
                 FrameReply::Info { gpu: Some(name), error: None }
             }
             Err(e) => FrameReply::Info { gpu: None, error: Some(e) },
@@ -465,12 +456,10 @@ pub async fn worker_frame(json: String) {
         }
         _ => (None, false),
     };
-    let mut replies = SERVER.with(|c| c.borrow_mut().get_or_insert_with(new_server).handle(msg));
-    while SERVER.with(|c| c.borrow().as_ref().is_some_and(|s| s.waiting())) {
-        let Some(g) = GPU.with(|c| c.borrow().clone()) else { break };
-        g.settled().await;
-        replies = SERVER.with(|c| c.borrow_mut().as_mut().map(|s| s.resume()).unwrap_or_default());
-    }
+    // Out of its slot while the frame awaits the GPU (worker.js handles one message at a time).
+    let mut server = SERVER.with(|c| c.borrow_mut().take()).unwrap_or_else(new_server);
+    let replies = server.handle_async(msg).await;
+    SERVER.with(|c| *c.borrow_mut() = Some(server));
     for (r, px) in replies {
         post_reply(&r, px.as_deref());
         if let (FrameReply::Frame { width, height, .. }, Some(px), Some(key)) = (&r, &px, &disk) {
